@@ -192,22 +192,59 @@ def make_project_dir(name=None, base: str | Path = ".") -> Path:
     return path
 
 
+def _gdrive_id(url: str):
+    """구글 드라이브 공유 주소에서 파일 ID 를 뽑는다(드라이브 주소가 아니면 None)."""
+    import re
+    if not re.search(r"(drive|docs|drive\.usercontent)\.google\.com", url):
+        return None
+    m = re.search(r"[?&]id=([\w-]+)", url) or re.search(r"/d/([\w-]+)", url)
+    return m.group(1) if m else None
+
+
+def _looks_like_html(path: Path) -> bool:
+    """받은 파일이 자료가 아니라 웹 페이지(HTML)인지 — 구글 드라이브 경고 화면 등."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(512).lstrip().lower()
+        return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+    except OSError:
+        return False
+
+
 def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
     """웹에서 파일을 내려받아 dest 경로에 저장한다(wget 설치 불필요).
 
     dest가 이미 있고 overwrite=False면 다시 받지 않는다(큰 데이터 재다운로드 방지).
-    requests가 설치돼 있으면 스트리밍으로 받고(구글 드라이브/리다이렉트에 강함),
-    없으면 표준 라이브러리 urllib로 받는다. 노트북마다 download_with_requests 같은
-    함수를 따로 정의하지 않아도 되도록 이 함수 하나로 모은다.
+    구글 드라이브 주소는 gdown 으로 받는다 — 100 MB 가 넘는 파일은 드라이브가 「바이러스 검사를
+    할 수 없습니다」 확인 화면(HTML)을 먼저 보내는데, gdown 이 그 단계를 넘겨 실제 파일을 받는다.
+    gdown 이 없으면 설치를 시도하고, 그래도 안 되면 확인 단계를 건너뛰는 주소(confirm=t)로 받는다.
+    그 밖의 주소는 requests 로 스트리밍하고, requests 가 없으면 표준 라이브러리 urllib 로 받는다.
 
         du.download("https://.../data.csv", PROJ / "data.csv")
         du.download(url, PROJ / "img.fit", overwrite=True)   # 항상 새로 받기
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and not overwrite:
+    if dest.exists() and not overwrite and not _looks_like_html(dest):
         print(f"{dest} (이미 있음 — 건너뜀)")
         return dest
+    fid = _gdrive_id(url)
+    if fid:
+        try:
+            import gdown
+        except ImportError:
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gdown"], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import gdown
+            except Exception:
+                gdown = None
+        if gdown is not None:
+            out = gdown.download(id=fid, output=str(dest), quiet=True)
+            if out and dest.exists() and not _looks_like_html(dest):
+                print(f"{dest} 다운로드 완료")
+                return dest
+        url = f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
     try:
         import requests  # 있으면 스트리밍 다운로드 사용
         with requests.get(url, stream=True, timeout=120,
@@ -221,7 +258,10 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req) as resp, open(dest, "wb") as fh:
             fh.write(resp.read())
-    print(f"{dest} 다운로드 완료")
+    if _looks_like_html(dest):
+        print(f"주의: {dest} 가 자료가 아니라 웹 페이지(HTML)입니다 — 주소나 공유 설정을 확인하세요.")
+    else:
+        print(f"{dest} 다운로드 완료")
     return dest
 
 
