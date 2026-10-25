@@ -16,6 +16,7 @@
     check_and_install(packages_str, install=True, show_versions=True)
     make_project_dir(name, base=".")
     download(url, dest, overwrite=False)
+    unpack(archive, dest=None, overwrite=False)
     list_files(directory, ext="*", pattern=None, recursive=False, show=True)
     preview_text(path, n=20, encoding=None, number=True)
     save_figure(fig, path_without_ext, formats=("pdf", "png"), dpi=200)
@@ -24,8 +25,12 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata as _md
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -173,6 +178,11 @@ def make_project_dir(name=None, base: str | Path = ".") -> Path:
     자동 인식에 실패하면 알기 쉬운 오류를 내므로, 그때는 이름을 직접 지정한다.
     이미 있으면 그대로 두고 경로만 돌려준다.
 
+    환경변수 DSES_DATA_DIR 이 있고 base 를 지정하지 않았으면 그 폴더 아래에 만든다.
+    노트북이 구글 드라이브 등 동기화 폴더 안에 있을 때, 내려받는 큰 자료를
+    동기화 밖에 두어 파일 잠김 · 반쯤 받은 파일 문제를 피하려는 것이다.
+    (코랩이나 환경변수가 없는 컴퓨터에서는 지금처럼 노트북 옆에 만든다.)
+
         PROJ = du.make_project_dir()                 # 노트북 파일명 자동
         PROJ = du.make_project_dir("내_폴더이름")     # 직접 지정
     """
@@ -183,6 +193,9 @@ def make_project_dir(name=None, base: str | Path = ".") -> Path:
                 "노트북 파일명을 자동으로 알 수 없습니다. "
                 "make_project_dir(\"폴더이름\") 처럼 이름을 직접 지정하세요."
             )
+    data_root = os.environ.get("DSES_DATA_DIR")
+    if data_root and str(base) == ".":
+        base = data_root
     path = Path(base) / name
     if path.exists():
         print(f"{path} (이미 있음)")
@@ -215,19 +228,27 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
     """웹에서 파일을 내려받아 dest 경로에 저장한다(wget 설치 불필요).
 
     dest가 이미 있고 overwrite=False면 다시 받지 않는다(큰 데이터 재다운로드 방지).
+    다만 크기가 0인 파일(받다가 끊긴 흔적)이나 웹 페이지(HTML)로 받은 파일은 다시 받는다.
     구글 드라이브 주소는 gdown 으로 받는다 — 100 MB 가 넘는 파일은 드라이브가 「바이러스 검사를
     할 수 없습니다」 확인 화면(HTML)을 먼저 보내는데, gdown 이 그 단계를 넘겨 실제 파일을 받는다.
     gdown 이 없으면 설치를 시도하고, 그래도 안 되면 확인 단계를 건너뛰는 주소(confirm=t)로 받는다.
     그 밖의 주소는 requests 로 스트리밍하고, requests 가 없으면 표준 라이브러리 urllib 로 받는다.
+
+    받는 동안에는 `파일이름.part` 에 쓰고, 다 받은 뒤(서버가 알려 준 크기와 같을 때)
+    한 번에 이름을 바꾼다. 그래서 중간에 끊겨도 반쯤 받은 파일이 dest 로 남지 않고,
+    동기화 프로그램이 받는 중인 파일을 붙잡아도 dest 가 깨지지 않는다.
 
         du.download("https://.../data.csv", PROJ / "data.csv")
         du.download(url, PROJ / "img.fit", overwrite=True)   # 항상 새로 받기
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and not overwrite and not _looks_like_html(dest):
+    if (dest.exists() and dest.stat().st_size > 0 and not overwrite
+            and not _looks_like_html(dest)):
         print(f"{dest} (이미 있음 — 건너뜀)")
         return dest
+    part = dest.with_name(dest.name + ".part")
+    expected = None
     fid = _gdrive_id(url)
     if fid:
         try:
@@ -240,8 +261,12 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
             except Exception:
                 gdown = None
         if gdown is not None:
-            out = gdown.download(id=fid, output=str(dest), quiet=True)
-            if out and dest.exists() and not _looks_like_html(dest):
+            try:
+                out = gdown.download(id=fid, output=str(part), quiet=True)
+            except Exception:
+                out = None
+            if out and part.exists() and part.stat().st_size > 0 and not _looks_like_html(part):
+                _replace_with_retry(part, dest)
                 print(f"{dest} 다운로드 완료")
                 return dest
         url = f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
@@ -250,19 +275,71 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
         with requests.get(url, stream=True, timeout=120,
                           headers={"User-Agent": "Mozilla/5.0"}) as resp:
             resp.raise_for_status()
-            with open(dest, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=8192):
+            if resp.headers.get("Content-Length") and not resp.headers.get("Content-Encoding"):
+                expected = int(resp.headers["Content-Length"])
+            with open(part, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 16):
                     if chunk:
                         fh.write(chunk)
     except ImportError:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as resp, open(dest, "wb") as fh:
-            fh.write(resp.read())
+        with urllib.request.urlopen(req) as resp, open(part, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+    size = part.stat().st_size
+    if size == 0 or (expected is not None and size != expected):
+        part.unlink(missing_ok=True)
+        raise IOError(f"내려받기가 완전하지 않습니다({size} / {expected} 바이트): {url}")
+    _replace_with_retry(part, dest)
     if _looks_like_html(dest):
         print(f"주의: {dest} 가 자료가 아니라 웹 페이지(HTML)입니다 — 주소나 공유 설정을 확인하세요.")
     else:
         print(f"{dest} 다운로드 완료")
     return dest
+
+
+def _replace_with_retry(src: Path, dest: Path, tries: int = 10, wait: float = 3.0) -> None:
+    """src 를 dest 로 바꿔 놓는다. 다른 프로그램(동기화 · 백신)이 dest 를 잠시
+    붙잡고 있으면 PermissionError 가 나므로 잠깐 기다렸다가 다시 시도한다."""
+    for i in range(tries):
+        try:
+            os.replace(src, dest)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            print(f"{dest.name} 이(가) 다른 프로그램에 잠겨 있음 — {wait:.0f}초 뒤 다시 시도")
+            time.sleep(wait)
+
+
+def unpack(archive: str | Path, dest: str | Path | None = None,
+           overwrite: bool = False) -> list[Path]:
+    """압축 파일(zip · tar.gz 등)을 풀고, 풀린 파일 목록을 돌려준다.
+
+    임시 폴더에 먼저 푼 뒤 파일을 하나씩 dest 로 옮긴다. 이미 있는(크기가 0이 아닌)
+    파일은 overwrite=False 면 건드리지 않으므로, 여러 번 실행해도 안전하고
+    동기화 프로그램이 잡고 있는 파일을 덮어쓰다 깨뜨리지 않는다.
+
+        du.unpack(PROJ / "data.zip")                 # PROJ 에 풀기
+        du.unpack(PROJ / "data.zip", PROJ / "raw")   # 다른 폴더에 풀기
+    """
+    archive = Path(archive)
+    dest = Path(dest) if dest is not None else archive.parent
+    dest.mkdir(parents=True, exist_ok=True)
+    out: list[Path] = []
+    with tempfile.TemporaryDirectory(dir=dest) as tmp:
+        shutil.unpack_archive(str(archive), tmp)
+        for f in sorted(Path(tmp).rglob("*")):
+            if not f.is_file():
+                continue
+            target = dest / f.relative_to(tmp)
+            if target.exists() and target.stat().st_size > 0 and not overwrite:
+                print(f"{target} (이미 있음 — 건너뜀)")
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _replace_with_retry(f, target)
+                print(f"{target} 풀림")
+            out.append(target)
+    return out
 
 
 def list_files(directory: str | Path, ext: str | list[str] = "*",
