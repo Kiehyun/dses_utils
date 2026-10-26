@@ -689,17 +689,27 @@ def add_jc_mags(tab):
     return tab
 
 
-def apphot_annulus(data, aperture, annulus, gain=1.0, rdnoise=0.0):
+def apphot_annulus(data, aperture, annulus, gain=1.0, rdnoise=0.0, method="exact"):
     """구경 측광을 하고 고리(annulus)에서 구한 하늘 배경을 뺀 결과를 DataFrame 으로 돌려준다.
 
+    3부(Ⅲ-08 구경 측광 · Ⅲ-10 측광 표준화 · Ⅲ-13 차등 측광)의 측광은 모두 이 함수 하나로 한다.
+
+    - 하늘값: 고리 안 픽셀을 sky_fit(method="mode", mode_option="sex") 로 어림(3σ 클리핑 뒤 최빈값).
+    - 오차(ADU): 구경 안 픽셀값의 합 N_ap, 구경 넓이 A, 이득 g(e-/ADU), 읽기 잡음 R(e-),
+      하늘값의 표준편차 σ_sky, 하늘값에 쓴 픽셀 수 n_sky 로
+      σ_F = sqrt(N_ap/g + A (R/g)^2 + A^2 σ_sky^2 / n_sky)
+      (포아송 잡음(별 + 하늘) + 읽기 잡음 + 하늘값 어림 오차)
+    - method: 구경이 걸친 픽셀을 넣는 방식(photutils, 기본 "exact")
+
     열: aperture_sum(_err), msky, ssky, nsky, nrej, aparea, source_sum(_err), mag, merr, snr
-    하늘값은 sky_fit(method="mode", mode_option="sex") 와 같은 방식으로 구한다.
+    source_sum ≤ 0 이면 mag · merr 는 NaN 이다(mag_inst 와 같음).
     """
     import numpy as np
     from photutils.aperture import aperture_photometry
 
+    # 화소마다의 오차 지도(ADU): 구경 안에서 더하면 N_ap/g + A (R/g)^2 가 된다
     error = np.sqrt(np.clip(data, 0, None) / gain + (rdnoise / gain)**2)
-    phot = aperture_photometry(data, aperture, error=error).to_pandas()
+    phot = aperture_photometry(data, aperture, error=error, method=method).to_pandas()
 
     masks = annulus.to_mask(method="center")
     if not isinstance(masks, list):          # 위치가 하나뿐일 때
@@ -713,9 +723,6 @@ def apphot_annulus(data, aperture, annulus, gain=1.0, rdnoise=0.0):
     # aperture_sum_err 에 하늘의 포아송 잡음이 이미 들어 있으므로 하늘값 어림 오차만 더함
     phot["source_sum_err"] = np.sqrt(phot["aperture_sum_err"]**2
                                      + (aperture.area * phot["ssky"])**2 / phot["nsky"])
-    snr = (phot["source_sum"] / phot["source_sum_err"]).clip(lower=0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        phot["mag"] = -2.5 * np.log10(phot["source_sum"])
-        phot["merr"] = 2.5 / np.log(10) / snr
-    phot["snr"] = snr
+    phot["mag"], phot["merr"] = mag_inst(phot["source_sum"], phot["source_sum_err"])
+    phot["snr"] = (phot["source_sum"] / phot["source_sum_err"]).clip(lower=0)
     return phot
