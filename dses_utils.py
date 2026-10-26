@@ -20,6 +20,12 @@
     list_files(directory, ext="*", pattern=None, recursive=False, show=True)
     preview_text(path, n=20, encoding=None, number=True)
     save_figure(fig, path_without_ext, formats=("pdf", "png"), dpi=200)
+
+천체 영상 · 측광 (astropy · photutils · scipy 필요)
+    znorm, zimshow, norm_imshow          영상 정규화 · 표시
+    checkPSolve                          FITS 위치 보정 여부
+    sky_fit, mag_inst, apphot_annulus    하늘값 · 기계 등급 · 구경 측광
+    select_in_fov, drop_ps1_flags, drop_star_groups, add_jc_mags   비교성 고르기
 """
 from __future__ import annotations
 
@@ -465,3 +471,251 @@ def save_figure(fig, path_without_ext: str | Path,
         saved.append(out)
         print(f"{out} 저장됨")
     return saved
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 천체 영상 · 측광 도우미 (III부 FITS 장 이후에서 공통으로 사용)
+#   책에서는 각 함수를 처음 쓰는 장에서 코드와 함께 한 번 설명하고,
+#   그 뒤 장에서는 du.<함수>() 로 불러 쓴다.
+#   astropy · photutils · scipy 는 함수 안에서 불러오므로, 이 부분을 쓰지 않는
+#   노트북은 해당 패키지가 없어도 dses_utils 를 불러올 수 있다.
+# ──────────────────────────────────────────────────────────────────────
+
+# Pan-STARRS1 f_objID 중 비교성에서 뺄 깃발 비트
+PS1_DEL_FLAG_BITS = [0, 1, 2, 3, 5, 7, 8, 9, 10, 23, 24]
+
+
+def znorm(image, stretch=None, **kwargs):
+    """ZScale 간격과 스트레칭(기본 선형)을 적용한 ImageNormalize 객체를 만든다.
+
+    kwargs 는 ZScaleInterval 에 그대로 넘긴다(예: contrast=0.1).
+    """
+    from astropy.visualization import ImageNormalize, LinearStretch, ZScaleInterval
+    return ImageNormalize(image, interval=ZScaleInterval(**kwargs),
+                          stretch=LinearStretch() if stretch is None else stretch)
+
+
+def zimshow(ax, image, stretch=None, cmap=None, origin="lower",
+            zscale_kw=None, **kwargs):
+    """ZScale 로 정규화해 ax 에 영상을 그리고 AxesImage 를 돌려준다.
+
+    zscale_kw 는 ZScaleInterval 에, 나머지 kwargs 는 ax.imshow 에 넘긴다.
+    """
+    return ax.imshow(image, norm=znorm(image, stretch=stretch, **(zscale_kw or {})),
+                     origin=origin, cmap=cmap, **kwargs)
+
+
+def norm_imshow(ax, data, origin="lower", stretch="linear", power=1.0,
+                asinh_a=0.1, min_cut=None, max_cut=None, min_percent=None,
+                max_percent=None, percent=None, clip=True, log_a=1000,
+                invalid=-1.0, zscale=False, vmin=None, vmax=None, **kwargs):
+    """여러 정규화(simple_norm, ZScale, vmin/vmax 직접 지정) 중 하나로 영상을 그린다.
+
+    - vmin 이나 vmax 를 주면 그 값으로 그린다(min_cut · max_cut 보다 우선).
+    - zscale=True 이면 ZScale 의 하한 · 상한을 vmin · vmax 로 쓴다.
+    - 그 밖에는 astropy simple_norm(stretch, percent, min_cut …) 으로 정규화한다.
+    """
+    from warnings import warn
+    from astropy.visualization import ImageNormalize, ZScaleInterval, simple_norm
+
+    if vmin is not None and min_cut is not None:
+        warn("vmin will override min_cut.")
+    if vmax is not None and max_cut is not None:
+        warn("vmax will override max_cut.")
+
+    if zscale:
+        zs = ImageNormalize(data, interval=ZScaleInterval())
+        min_cut = vmin = zs.vmin
+        max_cut = vmax = zs.vmax
+
+    if vmin is not None or vmax is not None:
+        return ax.imshow(data, origin=origin, vmin=vmin, vmax=vmax, **kwargs)
+    kw = dict(data=data, stretch=stretch, power=power, asinh_a=asinh_a,
+              min_percent=min_percent, max_percent=max_percent, percent=percent,
+              clip=clip, log_a=log_a, invalid=invalid)
+    try:                                 # astropy 6.1 부터 min_cut → vmin
+        norm = simple_norm(vmin=min_cut, vmax=max_cut, **kw)
+    except TypeError:
+        norm = simple_norm(min_cut=min_cut, max_cut=max_cut, **kw)
+    return ax.imshow(data, origin=origin, norm=norm, **kwargs)
+
+
+def checkPSolve(fpath, **kwargs):
+    """FITS 헤더에 천체 위치 보정(plate solving) 결과가 있는지 확인한다.
+
+    WCS 키워드가 6개 이상 있으면 SOLVE=True.
+    ASTAP 결과(PLTSOLVD 키)인지, 로컬 astrometry.net 결과(COMMENT 의 "scale:")인지도 함께 알려준다.
+    돌려주는 값: (SOLVE, ASTAP, LOCAL) 세 개의 bool
+    """
+    from astropy.io import fits
+
+    keys = ["CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2",
+            "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+            "A_0_0", "A_0_1", "A_1_0", "A_1_1",
+            "PC1_1", "PC1_2", "PC2_1", "PC2_2"]
+    hdr = fits.getheader(Path(fpath))
+    if sum(k in hdr for k in keys) <= 5:
+        return False, False, False
+    local = any("scale:" in str(c) for c in hdr.get("COMMENT", []))
+    astap = bool(hdr.get("PLTSOLVD", False))
+    return True, astap, local
+
+
+def sky_fit(all_sky, method="mode", sky_nsigma=3, sky_iter=5, mode_option="sex"):
+    """하늘(배경) 픽셀값 1차원 배열에서 하늘값을 추정한다.
+
+    method : "mean" | "median" → (값, 표준편차)
+             "mode" → 시그마 클리핑 뒤 최빈값 어림 (sky, std, nsky, nrej)
+    mode_option : "sex"  (SExtractor) 2.5·중앙값 − 1.5·평균, 치우침이 크면 중앙값
+                  "IRAF" 평균 < 중앙값이면 평균, 아니면 3·중앙값 − 2·평균
+                  "MMM"  3·중앙값 − 2·평균
+    """
+    import numpy as np
+    from astropy.stats import sigma_clip
+
+    sky = np.asarray(all_sky).ravel()
+    if method == "mean":
+        return np.mean(sky), np.std(sky, ddof=1)
+    if method == "median":
+        return np.median(sky), np.std(sky, ddof=1)
+    if method != "mode":
+        raise ValueError("method 는 'mean', 'median', 'mode' 중 하나")
+
+    good = sigma_clip(sky, sigma=sky_nsigma, maxiters=sky_iter).compressed()
+    nsky, nrej = good.size, sky.size - good.size
+    if nrej > nsky:
+        raise Warning("More than half of the pixels rejected.")
+    mean, med, std = np.mean(good), np.median(good), np.std(good, ddof=1)
+
+    if mode_option == "IRAF":
+        msky = mean if mean < med else 3 * med - 2 * mean
+    elif mode_option == "MMM":
+        msky = 3 * med - 2 * mean
+    elif mode_option == "sex":
+        msky = med if (mean - med) / std > 0.3 else 2.5 * med - 1.5 * mean
+    else:
+        raise ValueError("mode_option not understood")
+    return msky, std, nsky, nrej
+
+
+def mag_inst(flux, ferr):
+    """플럭스와 그 오차로 기계 등급 m = −2.5 log10(flux) 과 등급 오차를 구한다.
+
+    flux ≤ 0 인 값은 NaN 으로 돌려준다(스칼라 · 배열 모두 가능).
+    """
+    import numpy as np
+
+    flux = np.asarray(flux, dtype=float)
+    ferr = np.asarray(ferr, dtype=float)
+    ok = flux > 0
+    safe = np.where(ok, flux, 1.0)
+    m_inst = np.where(ok, -2.5 * np.log10(safe), np.nan)
+    merr = np.where(ok, 2.5 / np.log(10) * ferr / safe, np.nan)
+    if m_inst.ndim == 0:
+        return float(m_inst), float(merr)
+    return m_inst, merr
+
+
+def select_in_fov(tab, wcs, shape, bezel=0):
+    """목록(RAJ2000, DEJ2000 열)에 픽셀 좌표 x, y 열을 더하고, 영상 가장자리(bezel 픽셀) 안쪽 별만 남긴다."""
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+
+    coo = SkyCoord(tab["RAJ2000"], tab["DEJ2000"], unit=u.deg, frame="icrs")
+    x, y = wcs.world_to_pixel(coo)
+    tab["x"], tab["y"] = x, y
+    ny, nx = shape
+    inside = ((x > bezel) & (x < nx - 1 - bezel)
+              & (y > bezel) & (y < ny - 1 - bezel))
+    print(f"FOV   : {len(tab)} -> {inside.sum()} (bezel {bezel:.1f} px)")
+    return tab[inside]
+
+
+def drop_ps1_flags(tab, drop_by_kron=True, flag_bits=None):
+    """Pan-STARRS1 f_objID 깃발과 크론 등급으로 비교성에 맞지 않는 천체를 뺀다.
+
+    flag_bits 를 주지 않으면 PS1_DEL_FLAG_BITS 를 쓴다.
+    drop_by_kron=True 이면 점광원 등급 − 크론 등급 > 0.05 (퍼진 천체, 은하)도 뺀다.
+    """
+    import numpy as np
+
+    bits = PS1_DEL_FLAG_BITS if flag_bits is None else flag_bits
+    flags = np.ma.filled(tab["f_objID"], 0).astype(np.int64)
+    bad = np.zeros(len(tab), dtype=bool)
+    for bit in bits:
+        bad |= ((flags >> bit) & 1).astype(bool)
+    print(f"flags : {len(tab)} -> {(~bad).sum()}")
+    tab = tab[~bad]
+    if drop_by_kron:
+        dmag = np.ma.filled(tab["imag"] - tab["iKmag"], 0.0)
+        galaxy = dmag > 0.05
+        print(f"Kron  : {len(tab)} -> {(~galaxy).sum()}")
+        tab = tab[~galaxy]
+    return tab
+
+
+def drop_star_groups(tab, crit_sep):
+    """서로 crit_sep 픽셀보다 가까운 별은 짝을 모두 뺀다(x, y 열 필요)."""
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    pts = np.column_stack([tab["x"], tab["y"]])
+    grouped = np.zeros(len(tab), dtype=bool)
+    for i, j in cKDTree(pts).query_pairs(r=crit_sep):
+        grouped[[i, j]] = True
+    print(f"group : {len(tab)} -> {(~grouped).sum()} ({crit_sep:.1f} px)")
+    return tab[~grouped]
+
+
+def add_jc_mags(tab):
+    """PS1 g, r 등급으로 Johnson-Cousins B, V, R 등급과 g−r 색지수(오차 포함) 열을 더한다(Tonry+2012 변환식)."""
+    import numpy as np
+
+    def col(name):                       # 빈 값은 NaN 인 실수 배열로
+        return np.ma.filled(tab[name], np.nan).astype(float)
+
+    gr = col("gmag") - col("rmag")
+    tab["grcolor"] = gr
+    tab["e_grcolor"] = np.hypot(col("e_gmag"), col("e_rmag"))
+    # 밴드: (상수항, (g-r) 계수, 변환식의 흩어짐, 기준 등급)
+    pars = dict(B=(0.213, 0.587, 0.034, "gmag"),
+                V=(0.006, 0.474, 0.012, "rmag"),
+                R=(-0.138, -0.131, 0.015, "rmag"))
+    for band, (c0, c1, sc, base) in pars.items():
+        tab[f"{band}mag"] = c0 + c1 * gr + col(base)
+        dg, dr = (1 + c1, -c1) if base == "gmag" else (c1, 1 - c1)
+        tab[f"e_{band}mag"] = np.sqrt((dg * col("e_gmag"))**2
+                                      + (dr * col("e_rmag"))**2 + sc**2)
+    return tab
+
+
+def apphot_annulus(data, aperture, annulus, gain=1.0, rdnoise=0.0):
+    """구경 측광을 하고 고리(annulus)에서 구한 하늘 배경을 뺀 결과를 DataFrame 으로 돌려준다.
+
+    열: aperture_sum(_err), msky, ssky, nsky, nrej, aparea, source_sum(_err), mag, merr, snr
+    하늘값은 sky_fit(method="mode", mode_option="sex") 와 같은 방식으로 구한다.
+    """
+    import numpy as np
+    from photutils.aperture import aperture_photometry
+
+    error = np.sqrt(np.clip(data, 0, None) / gain + (rdnoise / gain)**2)
+    phot = aperture_photometry(data, aperture, error=error).to_pandas()
+
+    masks = annulus.to_mask(method="center")
+    if not isinstance(masks, list):          # 위치가 하나뿐일 때
+        masks = [masks]
+    for i, mask in enumerate(masks):
+        msky, ssky, nsky, nrej = sky_fit(mask.get_values(data))
+        phot.loc[i, ["msky", "ssky", "nsky", "nrej"]] = msky, ssky, nsky, nrej
+
+    phot["aparea"] = aperture.area
+    phot["source_sum"] = phot["aperture_sum"] - aperture.area * phot["msky"]
+    # aperture_sum_err 에 하늘의 포아송 잡음이 이미 들어 있으므로 하늘값 어림 오차만 더함
+    phot["source_sum_err"] = np.sqrt(phot["aperture_sum_err"]**2
+                                     + (aperture.area * phot["ssky"])**2 / phot["nsky"])
+    snr = (phot["source_sum"] / phot["source_sum_err"]).clip(lower=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        phot["mag"] = -2.5 * np.log10(phot["source_sum"])
+        phot["merr"] = 2.5 / np.log(10) / snr
+    phot["snr"] = snr
+    return phot
