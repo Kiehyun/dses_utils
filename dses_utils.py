@@ -24,7 +24,7 @@
 천체 영상 · 측광 (astropy · photutils · scipy 필요)
     znorm, zimshow, norm_imshow          영상 정규화 · 표시
     checkPSolve                          FITS 위치 보정 여부
-    sky_fit, mag_inst, apphot_annulus    하늘값 · 기계 등급 · 구경 측광
+    sky_fit, mag_inst, apphot_annulus    하늘값 · 기기 등급 · 구경 측광
     select_in_fov, drop_ps1_flags, drop_star_groups, add_jc_mags   비교성 고르기
 """
 from __future__ import annotations
@@ -178,14 +178,14 @@ def current_notebook_name():
 
 
 def make_project_dir(name=None, base: str | Path = ".") -> Path:
-    """프로젝트(자료 저장) 폴더를 만들고 경로를 반환한다.
+    """프로젝트(데이터 저장) 폴더를 만들고 경로를 반환한다.
 
     name 을 생략(None)하면 현재 노트북 파일명(확장자 제외)을 자동으로 사용한다.
     자동 인식에 실패하면 알기 쉬운 오류를 내므로, 그때는 이름을 직접 지정한다.
     이미 있으면 그대로 두고 경로만 돌려준다.
 
     환경변수 DSES_DATA_DIR 이 있고 base 를 지정하지 않았으면 그 폴더 아래에 만든다.
-    노트북이 구글 드라이브 등 동기화 폴더 안에 있을 때, 내려받는 큰 자료를
+    노트북이 구글 드라이브 등 동기화 폴더 안에 있을 때, 내려받는 큰 데이터를
     동기화 밖에 두어 파일 잠김 · 반쯤 받은 파일 문제를 피하려는 것이다.
     (코랩이나 환경변수가 없는 컴퓨터에서는 지금처럼 노트북 옆에 만든다.)
 
@@ -221,7 +221,7 @@ def _gdrive_id(url: str):
 
 
 def _looks_like_html(path: Path) -> bool:
-    """받은 파일이 자료가 아니라 웹 페이지(HTML)인지 — 구글 드라이브 경고 화면 등."""
+    """받은 파일이 데이터가 아니라 웹 페이지(HTML)인지 — 구글 드라이브 경고 화면 등."""
     try:
         with open(path, "rb") as fh:
             head = fh.read(512).lstrip().lower()
@@ -297,7 +297,7 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
         raise IOError(f"내려받기가 완전하지 않습니다({size} / {expected} 바이트): {url}")
     _replace_with_retry(part, dest)
     if _looks_like_html(dest):
-        print(f"주의: {dest} 가 자료가 아니라 웹 페이지(HTML)입니다 — 주소나 공유 설정을 확인하세요.")
+        print(f"주의: {dest} 가 데이터가 아니라 웹 페이지(HTML)입니다 — 주소나 공유 설정을 확인하세요.")
     else:
         print(f"{dest} 다운로드 완료")
     return dest
@@ -599,7 +599,7 @@ def sky_fit(all_sky, method="mode", sky_nsigma=3, sky_iter=5, mode_option="sex")
 
 
 def mag_inst(flux, ferr):
-    """플럭스와 그 오차로 기계 등급 m = −2.5 log10(flux) 과 등급 오차를 구한다.
+    """플럭스와 그 오차로 기기 등급 m = −2.5 log10(flux) 과 등급 오차를 구한다.
 
     flux ≤ 0 인 값은 NaN 으로 돌려준다(스칼라 · 배열 모두 가능).
     """

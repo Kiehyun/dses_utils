@@ -13,7 +13,7 @@ if not os.path.exists("dses_utils.py"):
 import dses_utils as du
 
 du.check_and_install("numpy, pandas, matplotlib")   # 필요한 모듈 점검/설치/버전표
-PROJ = du.make_project_dir("내_프로젝트_폴더")        # 자료 저장 폴더 생성
+PROJ = du.make_project_dir("내_프로젝트_폴더")        # 데이터 저장 폴더 생성
 du.download("https://.../data.csv", PROJ / "data.csv")  # 데이터 내려받기
 du.save_figure(fig, PROJ / "result")                # result.pdf + result.png 저장
 ```
