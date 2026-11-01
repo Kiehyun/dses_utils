@@ -143,6 +143,15 @@ def set_korean_font() -> None:
     # 공개 글꼴이 하나라도 있으면 OS 글꼴은 빼서, 글자 단위로 섞여 들어가지 않게 한다.
     installed = {f.name for f in font_manager.fontManager.ttflist}
     fonts = [f for f in ["NanumGothic", "Noto Sans CJK KR"] if f in installed]
+    if not fonts and "google.colab" in sys.modules:
+        # 코랩(리눅스)에는 한글 글꼴이 없으므로 나눔 글꼴을 설치해 등록한다(2026-11-02).
+        ttf = Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf")
+        if not ttf.exists():
+            subprocess.run(["apt-get", "-qq", "install", "-y", "fonts-nanum"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if ttf.exists():
+            font_manager.fontManager.addfont(str(ttf))
+            fonts = ["NanumGothic"]
     if not fonts:
         fonts = [f for f in os_font if f in installed]
     plt.rcParams["font.family"] = fonts + ["DejaVu Sans"]
@@ -156,7 +165,8 @@ def current_notebook_name():
       1) VS Code: 노트북 네임스페이스의 전역 변수 __vsc_ipynb_file__
       2) JupyterLab/Notebook: ipynbname 패키지(설치돼 있으면)
       3) 자동 실행(책 빌드): 환경변수 DSES_NOTEBOOK_NAME
-      4) Colab: COLAB_NOTEBOOK_ID 등은 파일명을 주지 않으므로 생략
+      4) Jupyter 서버가 커널에 넘겨 주는 환경변수 JPY_SESSION_NAME(노트북 경로)
+      5) Colab: 런타임의 세션 목록(http://172.28.0.12:9000/api/sessions)에 든 노트북 이름
     """
     import os
     # 1) VS Code — 노트북 사용자 네임스페이스에 전체 경로가 들어 있다.
@@ -179,6 +189,21 @@ def current_notebook_name():
     name = os.environ.get("DSES_NOTEBOOK_NAME")
     if name:
         return os.path.splitext(os.path.basename(name))[0]
+    # 4) Jupyter 서버(jupyter_server 2 이상)가 커널에 넘겨 주는 노트북 경로
+    name = os.environ.get("JPY_SESSION_NAME", "")
+    if name.endswith(".ipynb"):
+        return os.path.splitext(os.path.basename(name))[0]
+    # 5) 코랩 — 파일명을 주는 변수가 없어 런타임의 세션 목록에서 찾는다(2026-11-02).
+    if "google.colab" in sys.modules:
+        try:
+            import json
+            from urllib.request import urlopen
+            with urlopen("http://172.28.0.12:9000/api/sessions", timeout=3) as r:
+                sessions = json.load(r)
+            if sessions:
+                return os.path.splitext(sessions[0]["name"])[0]
+        except Exception:
+            pass
     return None
 
 
@@ -194,16 +219,16 @@ def make_project_dir(name=None, base: str | Path = ".") -> Path:
     동기화 밖에 두어 파일 잠김 · 반쯤 받은 파일 문제를 피하려는 것이다.
     (코랩이나 환경변수가 없는 컴퓨터에서는 지금처럼 노트북 옆에 만든다.)
 
-        PROJ = du.make_project_dir()                 # 노트북 파일명 자동
+        PROJ = du.make_project_dir()                 # 노트북 파일명 자동(모르면 dses_data)
         PROJ = du.make_project_dir("내_폴더이름")     # 직접 지정
     """
     if name is None:
         name = current_notebook_name()
         if not name:
-            raise ValueError(
-                "노트북 파일명을 자동으로 알 수 없습니다. "
-                "make_project_dir(\"폴더이름\") 처럼 이름을 직접 지정하세요."
-            )
+            # 멈추지 않고 공통 폴더를 쓴다 — 코랩 · 일반 주피터에서 이름을 못 찾을 때(2026-11-02)
+            name = "dses_data"
+            print("노트북 파일명을 알 수 없어 'dses_data' 폴더를 씁니다. "
+                  "make_project_dir(\"폴더이름\") 처럼 직접 지정할 수도 있습니다.")
     data_root = os.environ.get("DSES_DATA_DIR")
     if data_root and str(base) == ".":
         base = data_root
