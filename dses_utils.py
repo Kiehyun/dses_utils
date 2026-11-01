@@ -122,25 +122,30 @@ def check_and_install(packages_str: str, install: bool = True,
 
 
 def set_korean_font() -> None:
-    """matplotlib에서 한글이 깨지지 않도록 OS별 한글 글꼴과 마이너스 기호를 설정한다.
+    """matplotlib에서 한글이 깨지지 않도록 한글 글꼴과 마이너스 기호를 설정한다.
 
-    Windows는 'Malgun Gothic', macOS는 'AppleGothic', 그 외(리눅스)는 'NanumGothic'을
-    우선 적용하고, 글꼴이 없을 때를 대비해 'DejaVu Sans'를 함께 지정한다. 각 노트북에
-    같은 코드를 반복해 넣지 않도록 이 함수 하나로 모은다.
+    공개 글꼴(OFL) 나눔고딕 · Noto Sans CJK KR을 쓰고, 둘 다 없을 때만 OS 기본 글꼴
+    (Windows 'Malgun Gothic', macOS 'AppleGothic')로 넘어간다. 그림을 PDF로 저장하면
+    글꼴이 함께 들어가므로, 출판물에 쓸 수 있는 공개 글꼴을 앞에 둔다(2026-11-01).
+    마지막의 'DejaVu Sans'는 기호 등 빠진 글자를 채운다. Windows의 Noto Sans KR
+    (가변 글꼴 NotoSansKR-VF.ttf)은 matplotlib PDF 저장에서 오류가 나므로 넣지 않는다.
 
         import dses_utils as du
         du.set_korean_font()
     """
     import platform
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
 
     system = platform.system()
-    if system == "Windows":
-        plt.rcParams["font.family"] = ["Malgun Gothic", "Microsoft YaHei", "DejaVu Sans"]
-    elif system == "Darwin":  # macOS
-        plt.rcParams["font.family"] = ["AppleGothic", "Helvetica", "DejaVu Sans"]
-    else:  # Linux 등
-        plt.rcParams["font.family"] = ["NanumGothic", "DejaVu Sans"]
+    os_font = {"Windows": ["Malgun Gothic"], "Darwin": ["AppleGothic"]}.get(system, [])
+    # 없는 글꼴을 넣으면 그릴 때마다 경고가 나오므로 설치된 것만 남긴다.
+    # 공개 글꼴이 하나라도 있으면 OS 글꼴은 빼서, 글자 단위로 섞여 들어가지 않게 한다.
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    fonts = [f for f in ["NanumGothic", "Noto Sans CJK KR"] if f in installed]
+    if not fonts:
+        fonts = [f for f in os_font if f in installed]
+    plt.rcParams["font.family"] = fonts + ["DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False  # 마이너스 기호 깨짐 방지
 
 
