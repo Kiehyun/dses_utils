@@ -263,7 +263,7 @@ def _looks_like_html(path: Path) -> bool:
 def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
     """웹에서 파일을 내려받아 dest 경로에 저장한다(wget 설치 불필요).
 
-    dest가 이미 있고 overwrite=False면 다시 받지 않는다(큰 데이터 재다운로드 방지).
+    dest가 이미 있고 overwrite=False면 다시 받지 않는다(큰 데이터를 다시 내려받지 않게).
     다만 크기가 0인 파일(받다가 끊긴 흔적)이나 웹 페이지(HTML)로 받은 파일은 다시 받는다.
     구글 드라이브 주소는 gdown 으로 받는다 — 100 MB 가 넘는 파일은 드라이브가 「바이러스 검사를
     할 수 없습니다」 확인 화면(HTML)을 먼저 보내는데, gdown 이 그 단계를 넘겨 실제 파일을 받는다.
@@ -303,11 +303,11 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
                 out = None
             if out and part.exists() and part.stat().st_size > 0 and not _looks_like_html(part):
                 _replace_with_retry(part, dest)
-                print(f"{dest} 다운로드 완료")
+                print(f"{dest} 내려받기 완료")
                 return dest
         url = f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
     try:
-        import requests  # 있으면 스트리밍 다운로드 사용
+        import requests  # 있으면 스트리밍으로 내려받기
         with requests.get(url, stream=True, timeout=120,
                           headers={"User-Agent": "Mozilla/5.0"}) as resp:
             resp.raise_for_status()
@@ -329,7 +329,7 @@ def download(url: str, dest: str | Path, overwrite: bool = False) -> Path:
     if _looks_like_html(dest):
         print(f"주의: {dest} 가 데이터가 아니라 웹 페이지(HTML)입니다 — 주소나 공유 설정을 확인하세요.")
     else:
-        print(f"{dest} 다운로드 완료")
+        print(f"{dest} 내려받기 완료")
     return dest
 
 
