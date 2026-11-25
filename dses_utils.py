@@ -592,7 +592,7 @@ def checkPSolve(fpath, **kwargs):
 
 
 def sky_fit(all_sky, method="mode", sky_nsigma=3, sky_iter=5, mode_option="sex"):
-    """하늘(배경) 픽셀값 1차원 배열에서 하늘값을 추정한다.
+    """하늘(배경) 화소값 1차원 배열에서 하늘값을 추정한다.
 
     method : "mean" | "median" → (값, 표준편차)
              "mode" → 시그마 클리핑 뒤 최빈값 어림 (sky, std, nsky, nrej)
@@ -647,7 +647,7 @@ def mag_inst(flux, ferr):
 
 
 def select_in_fov(tab, wcs, shape, bezel=0):
-    """목록(RAJ2000, DEJ2000 열)에 픽셀 좌표 x, y 열을 더하고, 영상 가장자리(bezel 픽셀) 안쪽 별만 남긴다."""
+    """목록(RAJ2000, DEJ2000 열)에 화소 좌표 x, y 열을 더하고, 영상 가장자리(bezel 화소) 안쪽 별만 남긴다."""
     import astropy.units as u
     from astropy.coordinates import SkyCoord
 
@@ -685,7 +685,7 @@ def drop_ps1_flags(tab, drop_by_kron=True, flag_bits=None):
 
 
 def drop_star_groups(tab, crit_sep):
-    """서로 crit_sep 픽셀보다 가까운 별은 짝을 모두 뺀다(x, y 열 필요)."""
+    """서로 crit_sep 화소보다 가까운 별은 짝을 모두 뺀다(x, y 열 필요)."""
     import numpy as np
     from scipy.spatial import cKDTree
 
@@ -724,12 +724,12 @@ def apphot_annulus(data, aperture, annulus, gain=1.0, rdnoise=0.0, method="exact
 
     3부(Ⅲ-08 구경 측광 · Ⅲ-10 측광 표준화 · Ⅲ-13 차등 측광)의 측광은 모두 이 함수 하나로 한다.
 
-    - 하늘값: 고리 안 픽셀을 sky_fit(method="mode", mode_option="sex") 로 어림(3σ 클리핑 뒤 최빈값).
-    - 오차(ADU): 구경 안 픽셀값의 합 N_ap, 구경 넓이 A, 이득 g(e-/ADU), 읽기 잡음 R(e-),
-      하늘값의 표준편차 σ_sky, 하늘값에 쓴 픽셀 수 n_sky 로
+    - 하늘값: 고리 안 화소을 sky_fit(method="mode", mode_option="sex") 로 어림(3σ 클리핑 뒤 최빈값).
+    - 오차(ADU): 구경 안 화소값의 합 N_ap, 구경 넓이 A, 이득 g(e-/ADU), 읽기 잡음 R(e-),
+      하늘값의 표준편차 σ_sky, 하늘값에 쓴 화소 수 n_sky 로
       σ_F = sqrt(N_ap/g + A (R/g)^2 + A^2 σ_sky^2 / n_sky)
       (포아송 잡음(별 + 하늘) + 읽기 잡음 + 하늘값 어림 오차)
-    - method: 구경이 걸친 픽셀을 넣는 방식(photutils, 기본 "exact")
+    - method: 구경이 걸친 화소을 넣는 방식(photutils, 기본 "exact")
 
     열: aperture_sum(_err), msky, ssky, nsky, nrej, aparea, source_sum(_err), mag, merr, snr
     source_sum ≤ 0 이면 mag · merr 는 NaN 이다(mag_inst 와 같음).
